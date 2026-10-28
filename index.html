@@ -1,0 +1,1181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Libra — AI Teaching & Dictation Assistant</title>
+
+  <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'Inter', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace'],
+          },
+          colors: {
+            parchment: {
+              top: '#FAF6F0',
+              bottom: '#EADBC8',
+              card: '#FDFBF7',
+              drawer: '#F7F2EA',
+              tan: '#D9C2A3',
+              tanHover: '#CBB08C',
+              charcoal: '#1C1B18',
+              muted: '#8C857B',
+              border: '#E6DEC8'
+            }
+          },
+          boxShadow: {
+            'warm-sm': '0 2px 10px -2px rgba(28, 27, 24, 0.06)',
+            'warm-md': '0 8px 30px -4px rgba(28, 27, 24, 0.08)',
+            'warm-lg': '0 14px 44px -6px rgba(28, 27, 24, 0.12)',
+          }
+        }
+      }
+    };
+  </script>
+
+  <!-- React 18 & Babel Standalone -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    /* Subtle Paper Grain Overlay */
+    .paper-texture {
+      background-color: #FAF6F0;
+      background-image: 
+        radial-gradient(at 50% 0%, #FAF6F0 0%, transparent 75%),
+        linear-gradient(180deg, #FAF6F0 0%, #F3E9DC 55%, #EADBC8 100%);
+      position: relative;
+    }
+    .paper-texture::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 1;
+      opacity: 0.32;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.08'/%3E%3C/svg%3E");
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 5px;
+      height: 5px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(140, 133, 123, 0.28);
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(140, 133, 123, 0.45);
+    }
+
+    @keyframes pulseCursor {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+    .typewriter-cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1.1em;
+      background-color: #1C1B18;
+      margin-left: 2px;
+      vertical-align: middle;
+      animation: pulseCursor 0.8s infinite;
+    }
+  </style>
+</head>
+<body class="paper-texture text-parchment-charcoal antialiased selection:bg-parchment-tan/40 overflow-hidden">
+  <div id="root" class="relative z-10 h-dvh w-screen overflow-hidden"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+    // ============================================================================
+    // TEACHING SPEED CONFIGURATIONS (1 to 5 letters per second)
+    // ============================================================================
+    const TEACHING_SPEEDS = [
+      {
+        id: '1_lps',
+        label: '1 letter per second',
+        shortLabel: '1 letter/sec',
+        charsPerSec: 1,
+        msPerChar: 1000,
+      },
+      {
+        id: '2_lps',
+        label: '2 letter per second',
+        shortLabel: '2 letter/sec',
+        charsPerSec: 2,
+        msPerChar: 500,
+      },
+      {
+        id: '3_lps',
+        label: '3 letter per second',
+        shortLabel: '3 letter/sec',
+        charsPerSec: 3,
+        msPerChar: 333.33,
+      },
+      {
+        id: '4_lps',
+        label: '4 letter per second',
+        shortLabel: '4 letter/sec',
+        charsPerSec: 4,
+        msPerChar: 250,
+      },
+      {
+        id: '5_lps',
+        label: '5 letter per second',
+        shortLabel: '5 letter/sec',
+        charsPerSec: 5,
+        msPerChar: 200,
+      }
+    ];
+
+    const DEFAULT_AVATAR = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160&auto=format&fit=crop&q=80';
+
+    // ============================================================================
+    // CORE 2-3 WORD DICTATION CHUNKING ENGINE
+    // ============================================================================
+    function buildDictationPayload(rawText, speedConfig, isTemporaryChat) {
+      const normalized = rawText.replace(/\s+/g, ' ').trim();
+      const words = normalized.split(' ').filter(Boolean);
+      const rawChunks = [];
+
+      let i = 0;
+      while (i < words.length) {
+        const remaining = words.length - i;
+        let take = 3;
+
+        if (remaining <= 3) {
+          take = remaining;
+        } else if (remaining === 4) {
+          take = 2;
+        } else {
+          const w1 = words[i];
+          const w2 = words[i + 1];
+          if (/[,.;:?!]$/.test(w1)) {
+            take = 2;
+          } else if (/[,.;:?!]$/.test(w2)) {
+            take = 2;
+          } else {
+            const twoWordLen = (w1 + ' ' + w2).length;
+            take = twoWordLen > 14 ? 2 : 3;
+          }
+        }
+
+        const chunkWords = words.slice(i, i + take);
+        const textWithSpace = i + take < words.length
+          ? chunkWords.join(' ') + ' '
+          : chunkWords.join(' ');
+        rawChunks.push({
+          displayText: chunkWords.join(' '),
+          streamText: textWithSpace,
+        });
+        i += take;
+      }
+
+      let elapsedMs = 0;
+      const chunks = rawChunks.map((c, idx) => {
+        const charCount = c.streamText.length;
+        const dictationWindowMs = Math.round(charCount * speedConfig.msPerChar);
+        const item = {
+          index: idx,
+          text: c.displayText,
+          streamText: c.streamText,
+          charCount,
+          startTimeMs: elapsedMs,
+          dictationWindowMs,
+          audioUrl: `https://api.libra-dictate.ai/v1/audio/chunk_${idx}.mp3`
+        };
+        elapsedMs += dictationWindowMs;
+        return item;
+      });
+
+      return {
+        messageId: 'msg_' + Math.random().toString(36).substring(2, 9),
+        isSaved: !isTemporaryChat,
+        fullParagraph: normalized,
+        teachingSpeed: speedConfig.id,
+        msPerChar: speedConfig.msPerChar,
+        voiceProfile: 'libra-voice',
+        chunks,
+        fullAudioSsmlUrl: `https://api.libra-dictate.ai/v1/audio/full_dictation_${speedConfig.id}.mp3`
+      };
+    }
+
+    // ============================================================================
+    // CUSTOM ICONS
+    // ============================================================================
+    const DoubleBarIcon = ({ className = "w-5 h-5" }) => (
+      <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+        <line x1="4" y1="9" x2="20" y2="9" />
+        <line x1="4" y1="15" x2="16" y2="15" />
+      </svg>
+    );
+
+    const TempChatDashedPencilIcon = ({ className = "w-5 h-5", active = false }) => (
+      <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={active ? "2.1" : "1.8"} strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="9.5" strokeDasharray="3.2 3.2" />
+        <path d="M13.5 8.2L15.8 10.5L10.3 16H8V13.7L13.5 8.2Z" />
+      </svg>
+    );
+
+    // ============================================================================
+    // DICTATION MESSAGE CARD COMPONENT
+    // ============================================================================
+    function DictationResponseCard({ message, currentSpeedConfig }) {
+      const { payload, completedInitialStream } = message;
+      const fullText = payload.fullParagraph;
+      const chunks = payload.chunks;
+
+      const activeMsPerChar = currentSpeedConfig.msPerChar;
+
+      const [revealedChars, setRevealedChars] = useState(
+        completedInitialStream ? fullText.length : 0
+      );
+      const [isPlaying, setIsPlaying] = useState(!completedInitialStream);
+      const [activeChunkIndex, setActiveChunkIndex] = useState(0);
+      const [chunkProgressPct, setChunkProgressPct] = useState(completedInitialStream ? 100 : 0);
+
+      const spokenChunksRef = useRef(new Set());
+      const timerRef = useRef(null);
+
+      const chunkBoundaries = useMemo(() => {
+        let acc = 0;
+        return chunks.map((chunk) => {
+          const start = acc;
+          acc += chunk.streamText.length;
+          return { ...chunk, charStart: start, charEnd: acc };
+        });
+      }, [chunks]);
+
+      const speakPhrase = useCallback((phraseText) => {
+        if (!('speechSynthesis' in window)) return;
+        try {
+          window.speechSynthesis.cancel();
+          const utter = new SpeechSynthesisUtterance(phraseText);
+          utter.rate = 0.95;
+          utter.pitch = 1.0;
+
+          const voices = window.speechSynthesis.getVoices();
+          const preferredVoice = voices.find(v =>
+            /Google US English|Samantha|Natural|Victoria|Aria|Zira/i.test(v.name)
+          ) || voices.find(v => v.lang && v.lang.startsWith('en'));
+
+          if (preferredVoice) utter.voice = preferredVoice;
+          window.speechSynthesis.speak(utter);
+        } catch (e) {
+          // Ignore speech synthesis errors
+        }
+      }, []);
+
+      useEffect(() => {
+        if (!isPlaying) {
+          if (timerRef.current) clearInterval(timerRef.current);
+          return;
+        }
+
+        if (revealedChars >= fullText.length) {
+          setIsPlaying(false);
+          setChunkProgressPct(100);
+          return;
+        }
+
+        const currentChunkIdx = chunkBoundaries.findIndex(
+          b => revealedChars >= b.charStart && revealedChars < b.charEnd
+        );
+
+        if (currentChunkIdx !== -1) {
+          setActiveChunkIndex(currentChunkIdx);
+          const boundary = chunkBoundaries[currentChunkIdx];
+          const charsIntoChunk = revealedChars - boundary.charStart;
+          const pct = Math.min(100, Math.round((charsIntoChunk / boundary.charCount) * 100));
+          setChunkProgressPct(pct);
+
+          if (!spokenChunksRef.current.has(currentChunkIdx)) {
+            spokenChunksRef.current.add(currentChunkIdx);
+            speakPhrase(boundary.text);
+          }
+        }
+
+        timerRef.current = setTimeout(() => {
+          setRevealedChars(prev => prev + 1);
+        }, activeMsPerChar);
+
+        return () => {
+          if (timerRef.current) clearTimeout(timerRef.current);
+        };
+      }, [isPlaying, revealedChars, fullText.length, activeMsPerChar, chunkBoundaries, speakPhrase]);
+
+      const handleTogglePlay = () => {
+        if (revealedChars >= fullText.length) {
+          spokenChunksRef.current.clear();
+          setRevealedChars(0);
+          setActiveChunkIndex(0);
+          setChunkProgressPct(0);
+          setIsPlaying(true);
+        } else {
+          setIsPlaying(prev => !prev);
+        }
+      };
+
+      const handleRepeatCurrentChunk = () => {
+        const targetChunk = chunkBoundaries[activeChunkIndex] || chunkBoundaries[0];
+        if (!targetChunk) return;
+        spokenChunksRef.current.delete(targetChunk.index);
+        setRevealedChars(targetChunk.charStart);
+        setChunkProgressPct(0);
+        setIsPlaying(true);
+      };
+
+      const handleSelectChunk = (idx) => {
+        const target = chunkBoundaries[idx];
+        if (!target) return;
+        const nextSet = new Set();
+        for (let k = 0; k < idx; k++) nextSet.add(k);
+        spokenChunksRef.current = nextSet;
+        setActiveChunkIndex(idx);
+        setRevealedChars(target.charStart);
+        setChunkProgressPct(0);
+        setIsPlaying(true);
+      };
+
+      const activeChunk = chunkBoundaries[activeChunkIndex] || chunkBoundaries[0];
+      const activeChunkDurationMs = Math.round((activeChunk?.charCount || 0) * activeMsPerChar);
+
+      return (
+        <div className="w-full max-w-2xl bg-parchment-card border border-parchment-border/90 rounded-3xl p-5 sm:p-6 shadow-warm-md transition-all">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-3.5 mb-4 border-b border-parchment-border/60">
+            <div className="flex items-center gap-2.5">
+              <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-parchment-tan/45 text-parchment-charcoal">
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="22" />
+                </svg>
+              </span>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold tracking-wide uppercase text-parchment-charcoal">
+                    Libra Voice
+                  </span>
+                  <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-parchment-drawer text-parchment-muted border border-parchment-border">
+                    {currentSpeedConfig.shortLabel} ({Math.round(activeMsPerChar)}ms/char)
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleTogglePlay}
+                title={isPlaying ? "Pause Dictation" : (revealedChars >= fullText.length ? "Replay Full Paragraph" : "Resume Dictation")}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-parchment-tan text-parchment-charcoal hover:bg-parchment-tanHover transition shadow-sm"
+              >
+                {isPlaying ? (
+                  <>
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                      <rect x="6" y="5" width="4" height="14" rx="1" />
+                      <rect x="14" y="5" width="4" height="14" rx="1" />
+                    </svg>
+                    <span>Pause</span>
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                      <polygon points="6 4 20 12 6 20 6 4" />
+                    </svg>
+                    <span>{revealedChars >= fullText.length ? 'Replay' : 'Play'}</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                onClick={handleRepeatCurrentChunk}
+                title="Repeat Current 2–3 Word Phrase"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-medium bg-parchment-drawer text-parchment-charcoal hover:bg-parchment-tan/40 border border-parchment-border transition"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                  <path d="M3 3v5h5" />
+                </svg>
+                <span className="hidden sm:inline">Repeat Phrase</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="mb-5">
+            <p className="text-lg sm:text-xl leading-relaxed font-medium text-parchment-charcoal tracking-tight min-h-[3.25rem]">
+              <span>{fullText.slice(0, revealedChars)}</span>
+              {revealedChars < fullText.length && <span className="typewriter-cursor" />}
+              <span className="text-parchment-muted/25 select-none">
+                {fullText.slice(revealedChars)}
+              </span>
+            </p>
+          </div>
+
+          <div className="bg-parchment-drawer/90 border border-parchment-border/80 rounded-2xl p-3.5 mb-3">
+            <div className="flex items-center justify-between text-xs mb-2">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-parchment-charcoal">
+                  Active Phrase ({activeChunkIndex + 1}/{chunks.length}):
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-parchment-tan/40 text-parchment-charcoal font-medium">
+                  "{activeChunk?.text}"
+                </span>
+              </div>
+              <span className="font-mono text-[11px] text-parchment-muted">
+                {activeChunk?.charCount} chars × {Math.round(activeMsPerChar)}ms = {(activeChunkDurationMs / 1000).toFixed(1)}s window
+              </span>
+            </div>
+
+            <div className="w-full h-1.5 bg-parchment-border/70 rounded-full overflow-hidden mb-3">
+              <div
+                className="h-full bg-parchment-charcoal transition-all duration-150 rounded-full"
+                style={{
+                  width: `${revealedChars >= fullText.length ? 100 : chunkProgressPct}%`
+                }}
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {chunkBoundaries.map((chunk, idx) => {
+                const isCurrent = idx === activeChunkIndex && revealedChars < fullText.length;
+                const isDone = revealedChars >= chunk.charEnd;
+                return (
+                  <button
+                    key={chunk.index}
+                    onClick={() => handleSelectChunk(idx)}
+                    className={`text-xs px-2.5 py-1 rounded-lg border transition-all flex items-center gap-1.5 ${
+                      isCurrent
+                        ? 'bg-parchment-charcoal text-parchment-card border-parchment-charcoal shadow-sm scale-[1.02]'
+                        : isDone
+                        ? 'bg-parchment-tan/30 text-parchment-charcoal border-parchment-tan/60 hover:bg-parchment-tan/50'
+                        : 'bg-parchment-card text-parchment-muted border-parchment-border hover:text-parchment-charcoal'
+                    }`}
+                  >
+                    <span>{chunk.text}</span>
+                    <span className="text-[10px] opacity-70 font-mono">
+                      {chunk.charCount}c
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-parchment-muted px-1">
+            <span>
+              Written: <strong className="text-parchment-charcoal font-mono">{revealedChars}</strong> / {fullText.length} characters
+            </span>
+            <span>Click any 2–3 word phrase pill above to jump or repeat</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ============================================================================
+    // MAIN APPLICATION COMPONENT
+    // ============================================================================
+    function App() {
+      const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+      const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
+      const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+      const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+      
+      const [menuOpenChatId, setMenuOpenChatId] = useState(null);
+      const [renamingChatId, setRenamingChatId] = useState(null);
+      const [renameValue, setRenameValue] = useState('');
+
+      const [teachingSpeed, setTeachingSpeed] = useState(TEACHING_SPEEDS[2]);
+      const [isTemporaryChat, setIsTemporaryChat] = useState(false);
+      const [toastBanner, setToastBanner] = useState(null);
+
+      const [chatHistory, setChatHistory] = useState([]);
+      const [activeChatId, setActiveChatId] = useState(null);
+      const [currentMessages, setCurrentMessages] = useState([]);
+      const [searchQuery, setSearchQuery] = useState('');
+
+      const [inputText, setInputText] = useState('');
+      const [isProcessingInput, setIsProcessingInput] = useState(false);
+
+      const speedMenuRef = useRef(null);
+      const chatEndRef = useRef(null);
+
+      useEffect(() => {
+        const handleClickOutside = (e) => {
+          if (speedMenuRef.current && !speedMenuRef.current.contains(e.target)) {
+            setIsSpeedMenuOpen(false);
+          }
+          if (!e.target.closest('.chat-options-container')) {
+            setMenuOpenChatId(null);
+          }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+      }, []);
+
+      useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, [currentMessages, isProcessingInput]);
+
+      const triggerToast = (msg) => {
+        setToastBanner(msg);
+        setTimeout(() => {
+          setToastBanner((prev) => (prev === msg ? null : prev));
+        }, 3800);
+      };
+
+      const handleToggleTemporaryChat = () => {
+        setIsTemporaryChat((prev) => {
+          const next = !prev;
+          if (next) {
+            triggerToast("Temporary Chat: History won't be saved");
+          } else {
+            triggerToast("Standard Chat: History saving re-enabled");
+            if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+            setActiveChatId(null);
+            setCurrentMessages([]);
+            setInputText('');
+          }
+          return next;
+        });
+      };
+
+      const handleNewChat = () => {
+        if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+        setActiveChatId(null);
+        setCurrentMessages([]);
+        setInputText('');
+        setIsSidebarOpen(false);
+      };
+
+      const handleSelectChat = (chat) => {
+        if (renamingChatId === chat.id) return;
+        
+        if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+        setActiveChatId(chat.id);
+        setCurrentMessages(
+          chat.messages.map((m) =>
+            m.role === 'assistant' ? { ...m, completedInitialStream: true } : m
+          )
+        );
+        setIsSidebarOpen(false);
+      };
+
+      const filteredHistory = useMemo(() => {
+        const q = searchQuery.trim().toLowerCase();
+        if (!q) return chatHistory;
+        return chatHistory.filter(
+          (c) =>
+            c.title.toLowerCase().includes(q) ||
+            c.messages.some((m) => m.text && m.text.toLowerCase().includes(q))
+        );
+      }, [chatHistory, searchQuery]);
+
+      const groupedHistory = useMemo(() => {
+        const groups = { Pinned: [], Today: [], 'Previous 7 Days': [] };
+        filteredHistory.forEach((chat) => {
+          if (chat.isPinned) {
+            groups.Pinned.push(chat);
+          } else if (groups[chat.group]) {
+            groups[chat.group].push(chat);
+          } else {
+            groups['Previous 7 Days'].push(chat);
+          }
+        });
+        return groups;
+      }, [filteredHistory]);
+
+      const handleSendMessage = async (e) => {
+        if (e) e.preventDefault();
+        const trimmed = inputText.trim();
+        if (!trimmed) return;
+
+        const finalParagraph = trimmed;
+
+        const userMsg = {
+          id: 'u_' + Date.now(),
+          role: 'user',
+          text: finalParagraph
+        };
+
+        const updatedMessages = [...currentMessages, userMsg];
+        setCurrentMessages(updatedMessages);
+        setInputText('');
+        setIsProcessingInput(true);
+
+        setTimeout(() => {
+          const payload = buildDictationPayload(
+            finalParagraph,
+            teachingSpeed,
+            isTemporaryChat
+          );
+
+          const aiMsg = {
+            id: payload.messageId,
+            role: 'assistant',
+            payload,
+            completedInitialStream: false
+          };
+
+          const nextMessages = [...updatedMessages, aiMsg];
+          setCurrentMessages(nextMessages);
+          setIsProcessingInput(false);
+
+          if (!isTemporaryChat) {
+            const generatedTitle =
+              finalParagraph.split(' ').slice(0, 5).join(' ') +
+              (finalParagraph.split(' ').length > 5 ? '...' : '');
+
+            if (activeChatId) {
+              setChatHistory((prev) =>
+                prev.map((c) =>
+                  c.id === activeChatId ? { ...c, messages: nextMessages } : c
+                )
+              );
+            } else {
+              const newId = 'chat_' + Date.now();
+              setActiveChatId(newId);
+              setChatHistory((prev) => [
+                {
+                  id: newId,
+                  title: generatedTitle,
+                  group: 'Today',
+                  timestamp: 'Just now',
+                  isPinned: false,
+                  messages: nextMessages
+                },
+                ...prev
+              ]);
+            }
+          }
+        }, 280);
+      };
+
+      const handleDeleteAllChats = () => {
+        if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+        setChatHistory([]);
+        setCurrentMessages([]);
+        setActiveChatId(null);
+        setConfirmDeleteAll(false);
+        setIsSettingsModalOpen(false);
+        setIsSidebarOpen(false);
+        triggerToast('All saved chat history has been deleted');
+      };
+
+      const handleDeleteChat = (e, chatId) => {
+        e.stopPropagation();
+        setChatHistory(prev => prev.filter(c => c.id !== chatId));
+        if (activeChatId === chatId) handleNewChat();
+        setMenuOpenChatId(null);
+        triggerToast('Chat deleted');
+      };
+
+      const handleTogglePin = (e, chatId) => {
+        e.stopPropagation();
+        setChatHistory(prev => prev.map(c => 
+          c.id === chatId ? { ...c, isPinned: !c.isPinned } : c
+        ));
+        setMenuOpenChatId(null);
+      };
+
+      const handleShareChat = (e, chatId) => {
+        e.stopPropagation();
+        setMenuOpenChatId(null);
+        triggerToast('Conversation link copied to clipboard');
+      };
+
+      const handleRenameStart = (e, chat) => {
+        e.stopPropagation();
+        setMenuOpenChatId(null);
+        setRenamingChatId(chat.id);
+        setRenameValue(chat.title);
+      };
+
+      const handleRenameSubmit = (chatId) => {
+        if (renameValue.trim()) {
+          setChatHistory(prev => prev.map(c => 
+            c.id === chatId ? { ...c, title: renameValue.trim() } : c
+          ));
+        }
+        setRenamingChatId(null);
+      };
+
+      return (
+        <div className="relative flex flex-col h-dvh w-full select-none sm:select-auto">
+
+          <header className="fixed top-0 inset-x-0 z-30 h-16 px-4 sm:px-6 flex items-center justify-between bg-parchment-top/70 backdrop-blur-md border-b border-parchment-border/40">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <button
+                onClick={() => setIsSidebarOpen(true)}
+                aria-label="Open Sidebar Drawer"
+                className="w-10 h-10 rounded-full flex items-center justify-center text-parchment-charcoal hover:bg-parchment-tan/30 active:scale-95 transition"
+              >
+                <DoubleBarIcon className="w-5 h-5" />
+              </button>
+
+              <div className="relative" ref={speedMenuRef}>
+                <button
+                  onClick={() => setIsSpeedMenuOpen((prev) => !prev)}
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-full bg-parchment-card/90 hover:bg-parchment-card border border-parchment-border shadow-warm-sm text-sm font-medium text-parchment-charcoal transition"
+                >
+                  <span>Teaching speed</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-parchment-tan/45 text-parchment-charcoal font-semibold">
+                    {teachingSpeed.shortLabel}
+                  </span>
+                  <svg
+                    className={`w-4 h-4 text-parchment-muted transition-transform duration-200 ${
+                      isSpeedMenuOpen ? 'rotate-180' : ''
+                    }`}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+
+                {isSpeedMenuOpen && (
+                  <div className="absolute left-0 mt-2 w-72 rounded-2xl bg-parchment-card border border-parchment-border shadow-warm-lg p-2 z-50">
+                    <div className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-parchment-muted">
+                      Select Writing & Dictation Pace
+                    </div>
+                    {TEACHING_SPEEDS.map((option) => {
+                      const selected = teachingSpeed.id === option.id;
+                      return (
+                        <button
+                          key={option.id}
+                          onClick={() => {
+                            setTeachingSpeed(option);
+                            setIsSpeedMenuOpen(false);
+                            triggerToast(`Teaching speed set to ${option.label}`);
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left text-sm transition ${
+                            selected
+                              ? 'bg-parchment-tan/35 text-parchment-charcoal font-semibold'
+                              : 'text-parchment-charcoal hover:bg-parchment-drawer'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span>{option.label}</span>
+                            </div>
+                            <span className="text-xs text-parchment-muted">
+                              ~{Math.round(option.msPerChar)}ms per character
+                            </span>
+                          </div>
+                          <div
+                            className={`w-5 h-5 rounded-full flex items-center justify-center border ${
+                              selected
+                                ? 'bg-parchment-charcoal border-parchment-charcoal text-parchment-card'
+                                : 'border-parchment-muted/50'
+                            }`}
+                          >
+                            {selected && (
+                              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 sm:gap-3.5">
+              <button
+                onClick={handleToggleTemporaryChat}
+                title="Temporary Chat (Incognito / Do Not Save History)"
+                className={`flex items-center gap-2 px-3 py-2 rounded-full border transition active:scale-95 ${
+                  isTemporaryChat
+                    ? 'bg-parchment-charcoal text-parchment-card border-parchment-charcoal shadow-warm-sm'
+                    : 'bg-parchment-card/80 text-parchment-charcoal border-parchment-border hover:bg-parchment-card'
+                }`}
+              >
+                <TempChatDashedPencilIcon className="w-5 h-5" active={isTemporaryChat} />
+                <span className="hidden md:inline text-xs font-medium">
+                  {isTemporaryChat ? 'Temporary ON' : 'Temporary'}
+                </span>
+              </button>
+
+              <button
+                onClick={() => setIsSettingsModalOpen(true)}
+                title="Settings"
+                className="relative w-10 h-10 rounded-full overflow-hidden border-2 border-parchment-tan shadow-warm-sm hover:scale-105 transition focus:outline-none flex items-center justify-center bg-parchment-card text-parchment-charcoal"
+              >
+                <img
+                  src={DEFAULT_AVATAR}
+                  alt="Settings"
+                  className="w-full h-full object-cover"
+                />
+              </button>
+            </div>
+          </header>
+
+          {(isTemporaryChat || toastBanner) && (
+            <div className="fixed top-16 inset-x-0 z-20 flex justify-center px-4 pt-2 pointer-events-none">
+              <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-parchment-charcoal/95 text-parchment-card text-xs font-medium shadow-warm-md">
+                <TempChatDashedPencilIcon className="w-3.5 h-3.5 text-parchment-tan" active />
+                <span>
+                  {toastBanner || "Temporary Chat: History won't be saved"}
+                </span>
+              </div>
+            </div>
+          )}
+
+          <div
+            onClick={() => setIsSidebarOpen(false)}
+            className={`fixed inset-0 z-40 bg-parchment-charcoal/25 backdrop-blur-xs transition-opacity duration-300 ${
+              isSidebarOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+            }`}
+          />
+
+          <aside
+            className={`fixed top-0 left-0 bottom-0 z-50 w-[80vw] sm:w-72 bg-parchment-drawer/95 backdrop-blur-md border-r border-parchment-border shadow-warm-lg flex flex-col transition-transform duration-300 ease-out ${
+              isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
+            }`}
+          >
+            <div className="p-4 space-y-3 border-b border-parchment-border/70">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-parchment-tan" />
+                  <span className="font-semibold text-sm tracking-tight text-parchment-charcoal">
+                    Libra Dictation
+                  </span>
+                </div>
+                <button
+                  onClick={() => setIsSidebarOpen(false)}
+                  className="p-1.5 rounded-full text-parchment-muted hover:text-parchment-charcoal hover:bg-parchment-tan/25 transition"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+
+              <button
+                onClick={handleNewChat}
+                className="w-full py-2.5 px-4 rounded-xl bg-parchment-tan hover:bg-parchment-tanHover text-parchment-charcoal font-semibold text-sm flex items-center justify-center gap-2 shadow-warm-sm transition active:scale-[0.99]"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                <span>New Chat</span>
+              </button>
+
+              <div className="relative">
+                <svg
+                  className="w-4 h-4 text-parchment-muted absolute left-3.5 top-1/2 -translate-y-1/2"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search chat..."
+                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-parchment-card border border-parchment-border text-sm text-parchment-charcoal placeholder-parchment-muted focus:outline-none focus:border-parchment-tan"
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3 space-y-5">
+              {filteredHistory.length === 0 ? (
+                <div className="text-center py-10 px-4">
+                  <p className="text-xs text-parchment-muted">
+                    {searchQuery ? 'No matching chats found.' : 'No saved dictation history yet.'}
+                  </p>
+                </div>
+              ) : (
+                Object.entries(groupedHistory).map(([groupName, items]) =>
+                  items.length > 0 ? (
+                    <div key={groupName}>
+                      <div className="px-2.5 mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-parchment-muted">
+                        {groupName}
+                      </div>
+                      <div className="space-y-1">
+                        {items.map((chat) => {
+                          const isActive = activeChatId === chat.id;
+                          return (
+                            <div key={chat.id} className="relative group chat-options-container">
+                              <button
+                                onClick={() => handleSelectChat(chat)}
+                                className={`w-full text-left px-3 py-2.5 rounded-xl text-sm transition flex items-center justify-between ${
+                                  isActive
+                                    ? 'bg-parchment-tan/45 text-parchment-charcoal font-semibold'
+                                    : 'text-parchment-charcoal hover:bg-parchment-card/80'
+                                }`}
+                              >
+                                <div className="truncate pr-2 w-full">
+                                  {renamingChatId === chat.id ? (
+                                    <input
+                                      autoFocus
+                                      type="text"
+                                      value={renameValue}
+                                      onChange={(e) => setRenameValue(e.target.value)}
+                                      onBlur={() => handleRenameSubmit(chat.id)}
+                                      onKeyDown={(e) => e.key === 'Enter' && handleRenameSubmit(chat.id)}
+                                      className="w-full bg-parchment-card border border-parchment-tan px-1.5 py-0.5 rounded text-sm text-parchment-charcoal focus:outline-none"
+                                    />
+                                  ) : (
+                                    <>
+                                      <div className="truncate">{chat.title}</div>
+                                      <div className="text-[11px] text-parchment-muted font-normal">
+                                        {chat.timestamp}
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              </button>
+                              
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMenuOpenChatId(menuOpenChatId === chat.id ? null : chat.id);
+                                }}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-parchment-muted hover:text-parchment-charcoal opacity-50 sm:opacity-0 sm:group-hover:opacity-100 transition rounded-md hover:bg-parchment-drawer/80 z-10"
+                                aria-label="Chat options"
+                              >
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <circle cx="12" cy="12" r="1" />
+                                  <circle cx="12" cy="5" r="1" />
+                                  <circle cx="12" cy="19" r="1" />
+                                </svg>
+                              </button>
+
+                              {menuOpenChatId === chat.id && (
+                                <div className="absolute right-8 top-6 w-40 bg-parchment-card border border-parchment-border shadow-warm-lg rounded-xl py-1 z-50 overflow-hidden animate-fadeIn">
+                                  <button
+                                    onClick={(e) => handleRenameStart(e, chat)}
+                                    className="w-full text-left px-3.5 py-2 text-xs font-medium text-parchment-charcoal hover:bg-parchment-drawer transition flex items-center gap-2"
+                                  >
+                                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                    Rename
+                                  </button>
+                                  <button
+                                    onClick={(e) => handleTogglePin(e, chat.id)}
+                                    className="w-full text-left px-3.5 py-2 text-xs font-medium text-parchment-charcoal hover:bg-parchment-drawer transition flex items-center gap-2"
+                                  >
+                                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
+                                    {chat.isPinned ? 'Unpin' : 'Pin'}
+                                  </button>
+                                  <button
+                                    onClick={(e) => handleShareChat(e, chat.id)}
+                                    className="w-full text-left px-3.5 py-2 text-xs font-medium text-parchment-charcoal hover:bg-parchment-drawer transition flex items-center gap-2"
+                                  >
+                                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+                                    Share conversation
+                                  </button>
+                                  <div className="h-[1px] bg-parchment-border/70 my-1"></div>
+                                  <button
+                                    onClick={(e) => handleDeleteChat(e, chat.id)}
+                                    className="w-full text-left px-3.5 py-2 text-xs font-medium text-red-600 hover:bg-red-50 transition flex items-center gap-2"
+                                  >
+                                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                    Delete
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null
+                )
+              )}
+            </div>
+
+            <div className="p-3 border-t border-parchment-border/80 bg-parchment-drawer">
+              <button
+                onClick={() => {
+                  setIsSidebarOpen(false);
+                  setIsSettingsModalOpen(true);
+                }}
+                className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-parchment-card transition text-sm font-medium text-parchment-charcoal"
+              >
+                <div className="flex items-center gap-3">
+                  <img
+                    src={DEFAULT_AVATAR}
+                    alt="Settings"
+                    className="w-8 h-8 rounded-full object-cover border border-parchment-tan"
+                  />
+                  <div className="text-left">
+                    <div className="text-xs font-semibold text-parchment-charcoal">
+                      Settings
+                    </div>
+                  </div>
+                </div>
+                <svg className="w-4 h-4 text-parchment-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+              </button>
+            </div>
+          </aside>
+
+          <main className="flex-1 overflow-y-auto pt-20 pb-32 px-4 sm:px-6">
+            {currentMessages.length === 0 ? (
+              <div className="h-full min-h-[65vh] flex flex-col items-center justify-center text-center max-w-xl mx-auto">
+                <h1 className="text-2xl font-medium text-parchment-charcoal tracking-tight">
+                  Hi! what's your plan?
+                </h1>
+              </div>
+            ) : (
+              <div className="max-w-3xl mx-auto space-y-6 py-4">
+                {currentMessages.map((msg) =>
+                  msg.role === 'user' ? (
+                    <div key={msg.id} className="flex flex-col items-end">
+                      <div className="max-w-xl bg-parchment-tan text-parchment-charcoal px-5 py-3.5 rounded-3xl rounded-br-md shadow-warm-sm text-sm sm:text-base font-medium leading-relaxed">
+                        {msg.text}
+                      </div>
+                    </div>
+                  ) : (
+                    <div key={msg.id} className="flex justify-start">
+                      <DictationResponseCard
+                        message={msg}
+                        currentSpeedConfig={teachingSpeed}
+                      />
+                    </div>
+                  )
+                )}
+
+                {isProcessingInput && (
+                  <div className="flex justify-start">
+                    <div className="bg-parchment-card border border-parchment-border rounded-3xl px-5 py-4 shadow-warm-sm flex items-center gap-3 text-sm text-parchment-muted">
+                      <span className="w-2.5 h-2.5 rounded-full bg-parchment-tan animate-ping" />
+                      <span>Libra Voice is preparing your 2–3 word dictation chunks...</span>
+                    </div>
+                  </div>
+                )}
+
+                <div ref={chatEndRef} />
+              </div>
+            )}
+          </main>
+
+          <div className="fixed bottom-0 inset-x-0 z-30 px-4 pb-5 pt-2 bg-gradient-to-t from-parchment-bottom via-parchment-bottom/80 to-transparent pointer-events-none">
+            <div className="max-w-2xl mx-auto pointer-events-auto">
+              <form
+                onSubmit={handleSendMessage}
+                className="relative flex items-center rounded-full bg-parchment-card border border-parchment-border/90 shadow-warm-lg px-2.5 py-2 transition-all focus-within:ring-2 focus-within:ring-parchment-tan/60"
+              >
+                <input
+                  type="text"
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  placeholder="Paste what you want to write"
+                  className="flex-1 bg-transparent pl-4 pr-3 py-2 text-sm sm:text-base text-parchment-charcoal placeholder-parchment-muted focus:outline-none overflow-x-auto"
+                />
+
+                <button
+                  type="submit"
+                  disabled={!inputText.trim()}
+                  aria-label="Send for Dictation"
+                  className="w-10 h-10 rounded-full bg-parchment-tan hover:bg-parchment-tanHover disabled:opacity-45 text-parchment-charcoal flex items-center justify-center transition shadow-warm-sm active:scale-95 shrink-0 ml-2"
+                >
+                  <svg className="w-4 h-4 translate-x-[-1px] translate-y-[1px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13" />
+                    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                  </svg>
+                </button>
+              </form>
+            </div>
+          </div>
+
+          {isSettingsModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-parchment-charcoal/40 backdrop-blur-xs">
+              <div className="w-full max-w-md rounded-3xl bg-parchment-card border border-parchment-border shadow-warm-lg p-6 space-y-5">
+                <div className="flex items-center justify-between border-b border-parchment-border pb-3">
+                  <h2 className="text-lg font-semibold text-parchment-charcoal">
+                    Settings
+                  </h2>
+                  <button
+                    onClick={() => {
+                      setIsSettingsModalOpen(false);
+                      setConfirmDeleteAll(false);
+                    }}
+                    className="p-1.5 rounded-full text-parchment-muted hover:text-parchment-charcoal hover:bg-parchment-drawer"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-parchment-muted mb-2">
+                    Data & History Management
+                  </div>
+                  {!confirmDeleteAll ? (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteAll(true)}
+                      className="w-full py-2.5 px-4 rounded-xl bg-[#DC2626] hover:bg-red-700 text-white font-semibold text-sm transition flex items-center justify-center gap-2 shadow-sm"
+                    >
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
+                      <span>Delete All Chats</span>
+                    </button>
+                  ) : (
+                    <div className="p-3.5 rounded-2xl bg-red-50 border border-red-200 space-y-2.5">
+                      <p className="text-xs text-red-800 font-medium">
+                        Are you sure you want to permanently delete all saved dictation chats? This action cannot be undone.
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleDeleteAllChats}
+                          className="flex-1 py-2 rounded-xl bg-[#DC2626] text-white text-xs font-semibold hover:bg-red-700 transition"
+                        >
+                          Yes, Delete Everything
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteAll(false)}
+                          className="flex-1 py-2 rounded-xl bg-white text-parchment-charcoal border border-parchment-border text-xs font-medium"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
